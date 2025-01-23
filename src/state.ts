@@ -13,7 +13,7 @@ export class Source<T> implements Value<T> {
 	constructor(
 		public v: T, // Current value
 		public equals: Equals<T> = Object.is,
-	) {}
+	) { }
 
 	get() {
 		if (activeEffect) {
@@ -69,11 +69,10 @@ function createProxy<T>(target: T) {
 	}
 
 	if (target instanceof Set) {
-		return new ReactiveSet(Array.from(target)) as unknown as T;
+		return new ReactiveSet(target.values()) as unknown as T;
 	}
 
 	const sources = new Map<string | symbol, Source<any>>();
-	const version = new Source(0);
 
 	if (Array.isArray(target)) {
 		// Create 'length' source eagerly for arrays
@@ -124,12 +123,14 @@ function createProxy<T>(target: T) {
 				source.set(createProxy(value));
 			}
 
-			if (Array.isArray(target) && typeof prop === "string") {
-				const index = Number(prop);
-				if (Number.isInteger(index)) {
-					const lengthSource = sources.get("length") as Source<number>;
-					if (index >= lengthSource.get()) {
-						lengthSource.set(index + 1);
+			if (Array.isArray(target) && prop === "length") {
+				for (let i = value; i < source?.v; i++) {
+					let otherSource = sources.get(i);
+					if (otherSource !== undefined) {
+						otherSource.set(undefined);
+					} else if (i in target) {
+						otherSource = new Source(UNINITIALIZED);
+						sources.set(i, otherSource)
 					}
 				}
 			}
