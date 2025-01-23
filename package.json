@@ -1,0 +1,42 @@
+{
+  "name": "@aurios/newton",
+  "version": "0.1.0",
+  "description": "Every action has a reaction and a signal too",
+  "module": "./src/index.ts",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0",
+    "@vitest/coverage-v8": "^1.0.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "state",
+    "reactive",
+    "signals"
+  ],
+  "author": {
+    "name": "Lucas A. Ouverney",
+    "email": "lucas210898.lao@gmail.com",
+    "url": "https://github.com/realfakenerd"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/realfakenerd/newton"
+  },
+  "license": "MIT"
+}
