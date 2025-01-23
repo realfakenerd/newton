@@ -229,6 +229,20 @@ function createProxy<T>(value: T) {
 
 			return true;
 		},
+		ownKeys(target) {
+			const ownKeys = Reflect.ownKeys(target).filter(key => {
+				const source = sources.get(key);
+				return source === undefined || source.v !== UNINITIALIZED;
+			});
+
+			for (const [key, source] of sources) {
+				if (source?.v !== UNINITIALIZED && !(key in target)) {
+					ownKeys.push(key);
+				}
+			}
+
+			return ownKeys;
+		},
 	});
 }
 
