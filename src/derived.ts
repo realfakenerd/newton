@@ -17,8 +17,8 @@ const derivedCache = new WeakMap<DerivedFn<any>, WeakRef<Derived<any>>>();
 
 export class Derived<T> implements Value<T> {
 	f = 0; // Bitmask flags for internal state tracking
-	wv = 0; // Write version - incremented on value change
-	rv = 0; // Read version - used to detect stale reads
+	#wv = 0; // Write version - incremented on value change
+	#rv = 0; // Read version - used to detect stale reads
 	reactions: Reaction[] | null = null; // List of reactions to notify on change
 	deps: Value[] | null = null; // List of dependencies for derived values
 	v: T; // Current value
@@ -68,7 +68,7 @@ export class Derived<T> implements Value<T> {
 	#handleDependencyChange() {
 		if (!(this.f & Flags.DIRTY)) {
 			this.f |= Flags.DIRTY;
-			this.wv++;
+			this.#wv++;
 		}
 
 		if (this.reactions && batchDepth === 0) {
@@ -114,7 +114,7 @@ export class Derived<T> implements Value<T> {
 
 					if (!this.equals(this.v, value)) {
 						this.v = value;
-						this.wv++;
+						this.#wv++;
 						this.#notifyReactions();
 					}
 
@@ -164,7 +164,7 @@ export class Derived<T> implements Value<T> {
 
 			if (!this.equals(this.v, value)) {
 				this.v = value;
-				this.wv++;
+				this.#wv++;
 			}
 
 			this.f &= ~Flags.DIRTY;
@@ -204,7 +204,7 @@ export class Derived<T> implements Value<T> {
 	}
 
 	get() {
-		this.rv++;
+		this.#rv++;
 
 		if (activeEffect) {
 			if (!this.reactions) {
