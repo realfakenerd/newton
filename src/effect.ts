@@ -1,3 +1,4 @@
+import { CLEAN } from "./constants.js";
 import type { EffectFn, Reaction } from "./types.js";
 
 export let activeEffect: Reaction | null = null;
@@ -9,8 +10,7 @@ export function setActiveEffect(effect: Reaction | null) {
 
 export function effect(fn: EffectFn) {
 	const reaction: Reaction = {
-		f: 0,
-		wv: 0,
+		f: CLEAN,
 		fn,
 		deps: null,
 	};
