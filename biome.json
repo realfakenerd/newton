@@ -5,6 +5,9 @@
       "suspicious": {
         "noConstEnum": "off",
         "noExplicitAny": "off"
+      },
+      "performance": {
+        "noDelete": "off"
       }
     }
   }
