@@ -2,16 +2,16 @@ import { describe, it, expect } from "vitest";
 import { state } from "../src";
 
 describe("state", () => {
-	it("should create a signal with initial value", () => {
-		const count = state(0);
-		expect(count).toBe(0);
-	});
+    it("should create a signal with initial value", () => {
+        const count = state(0);
+        expect(count).toBe(0);
+    });
 
-	it("should update signal value", () => {
-		let count = state(0);
-		count = 1;
-		expect(count).toBe(1);
-	});
+    it("should update signal value", () => {
+        let count = state(0);
+        count = 1;
+        expect(count).toBe(1);
+    });
 
     it("should handle object properties", () => {
         const user = state({ name: "John", age: 25 });
@@ -57,7 +57,10 @@ describe("state", () => {
     });
 
     it("should handle property deletion", () => {
-        const obj = state({ name: "John", age: 25 });
+        const obj = state<{
+            name: string;
+            age?: number;
+        }>({ name: "John", age: 25 });
         delete obj.age;
         expect(obj.age).toBeUndefined();
         expect('age' in obj).toBe(false);
@@ -66,7 +69,7 @@ describe("state", () => {
     it("should handle Map operations", () => {
         const map = state(new Map([["key1", "value1"]]));
         expect(map.get("key1")).toBe("value1");
-        
+
         map.set("key2", "value2");
         expect(map.get("key2")).toBe("value2");
         expect(map.size).toBe(2);
@@ -80,7 +83,7 @@ describe("state", () => {
         const map = state(new Map([["a", 1], ["b", 2]]));
         const entries = Array.from(map.entries());
         expect(entries).toEqual([["a", 1], ["b", 2]]);
-        
+
         const keys = Array.from(map.keys());
         expect(keys).toEqual(["a", "b"]);
 
