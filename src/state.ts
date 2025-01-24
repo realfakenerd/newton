@@ -1,62 +1,77 @@
 import { batchDepth, batchQueue } from "./batch.js";
+import { CLEAN, DERIVED, DIRTY, MAYBE_DIRTY } from "./constants.js";
 import { activeEffect } from "./effect.js";
 import { ReactiveMap, ReactiveSet } from "./iterators.js";
 import { STATE_SYMBOL, UNINITIALIZED } from "./symbols.js";
 import type { Equals, Reaction, Value } from "./types.js";
 import { getDescriptor, isArray } from "./utils.js";
 
-export class Source<T> implements Value<T> {
-	f = 0; // Flags bitmask for internal state tracking
-	wv = 0; // Write version - incremented on value change
-	rv = 0; // Read version - used to detect stale reads
-	reactions: Reaction[] | null = null; // List of reactions to notify on change
+export class Source<T> {
+	#v: T; // Value
+	#f = CLEAN; // Flags bitmask for internal state tracking
+	#reactions: Set<Reaction>; // List of reactions to notify on change
+	#reactionCount = 0;
+
 
 	constructor(
-		public v: T, // Current value
+		value: T,
 		public equals: Equals<T> = Object.is,
-	) { }
+	) {
+		this.#v = value;
+		this.#reactions = new Set();
+	}
+
+	get v() {
+		return this.#v;
+	}
 
 	get() {
 		if (activeEffect) {
-			if (!this.reactions) {
-				this.reactions = [];
-			}
-
-			if (!this.reactions.includes(activeEffect)) {
-				this.reactions.push(activeEffect);
+			if (!this.#reactions.has(activeEffect)) {
+				this.#reactions.add(activeEffect);
+				this.#reactionCount++;
 			}
 		}
-
-		return this.v;
+		return this.#v;
 	}
 
 	set(newValue: T) {
-		if (!this.equals(this.v, newValue)) {
-			this.v = newValue;
-			this.wv++;
+		if (this.equals(this.v, newValue)) return;
+		const reactionCount = this.#reactionCount;
 
-			this.#notify();
+		this.#v = newValue;
+		this.#f |= DIRTY;
+		if (reactionCount === 0) return;
+		this.#markReactions(reactionCount);
+	}
+
+	#markReactions(reactionCount: number) {
+		if (reactionCount === 0) return;
+
+		for (const reaction of this.#reactions) {
+			if (!(reaction.f & (DIRTY | CLEAN))) {
+				this.#setReactionStatus(reaction);
+			}
 		}
 	}
 
-	#notify() {
-		if (this.reactions) {
-			if (batchDepth > 0) {
-				batchQueue.add(this as Value);
-				return;
-			}
+	#setReactionStatus(reaction: Reaction) {
+		if (!(reaction.f & (CLEAN | DIRTY))) return;
 
-			const reactions = Array.from(this.reactions);
-			for (const reaction of reactions) {
-				if (reaction.fn) {
-					try {
-						reaction.fn();
-					} catch (error) {
-						console.error("Effect Error:", error);
-					}
-				}
-			}
+		if (reaction.f & DERIVED) {
+			reaction.f |= MAYBE_DIRTY;
+		} else {
+			this.#scheduleEffect(reaction);
 		}
+	}
+
+	#scheduleEffect(reaction: Reaction) {
+		if (batchDepth > 0) {
+			batchQueue.add(this as unknown as Value);
+			return;
+		}
+
+		reaction.fn?.();
 	}
 }
 
@@ -186,16 +201,20 @@ function createProxy<T>(value: T) {
 			let has = prop in target;
 
 			if (isProxiedArray && prop === "length") {
-				const length = (source as Source<number>).v;
-				for (let i = value; i < length; i++) {
-					let otherSource = sources.get(String(i));
-					if (otherSource !== undefined) {
-						otherSource.set(undefined);
-					} else if (i in target) {
-						otherSource = new Source(UNINITIALIZED);
-						sources.set(String(i), otherSource)
+				const lengthSource = sources.get("length") as Source<number>;
+
+				if (lengthSource) {
+					lengthSource.set(value);
+				}
+
+				for (let i = value; i < (target as unknown[]).length; i++) {
+					const indexSource = sources.get(i.toString()) as Source<any>;
+					if (indexSource) {
+						indexSource.set(UNINITIALIZED);
 					}
 				}
+				(target as unknown[]).length = value;
+				return true;
 			}
 
 			if (
@@ -204,24 +223,22 @@ function createProxy<T>(value: T) {
 			) {
 				source = new Source(undefined);
 				sources.set(prop, source);
-			} else {
-				has = source?.v !== UNINITIALIZED;
-				source?.set(createProxy(value));
 			}
 
-			const descriptor = Reflect.getOwnPropertyDescriptor(target, prop);
-
-			if (descriptor?.set) {
-				descriptor.set.call(target, receiver);
+			if (source) {
+				has = source?.v !== UNINITIALIZED;
+				source?.set(createProxy(value));
+			} else {
+				Reflect.set(target, prop, value, receiver);
 			}
 
 			if (!has) {
 				if (isProxiedArray && typeof prop === 'string') {
 					const index = Number(prop);
 					if (Number.isInteger(index)) {
-						const ls = sources.get('length') as Source<number>;
-						if (index >= ls.get()) {
-							ls.set(index + 1);
+						const lengthSource = sources.get('length') as Source<number>;
+						if (lengthSource && index >= lengthSource.get()) {
+							lengthSource.set(index + 1);
 						}
 					}
 				}
