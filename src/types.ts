@@ -14,6 +14,23 @@ export interface Value<V = unknown> extends Signal {
 }
 
 export interface Reaction extends Signal {
+	flags: number;
 	fn: EffectFn | null;
 	deps: Value[] | null;
+}
+
+export interface DerivedValue<T = any> {
+	flags: number;
+	writeVersion: number;
+	readVersion: number;
+	reactions: Reaction[] | null;
+	deps: Value[] | null;
+	value: T;
+	fn: () => T;
+	equals: Equals<T>;
+	computeCount: number;
+	lastComputedTime: number;
+	cacheThreshold: number;
+	parent: DerivedValue<any> | null;
+	children: DerivedValue<any>[] | null;
 }

@@ -1,18 +1,28 @@
 import { CLEAN } from "./constants.js";
-import type { EffectFn, Reaction } from "./types.js";
+import type { DerivedValue, EffectFn, Reaction } from "./types.js";
 
-export let activeEffect: Reaction | null = null;
-export const effectStack: Reaction[] = [];
+export let activeEffect: DerivedValue | null = null;
+export const effectStack: DerivedValue[] = [];
 
-export function setActiveEffect(effect: Reaction | null) {
+export function setActiveEffect(effect: DerivedValue | null) {
 	activeEffect = effect;
 }
 
 export function effect(fn: EffectFn) {
-	const reaction: Reaction = {
-		f: CLEAN,
+	const reaction: DerivedValue = {
+		flags: CLEAN,
 		fn,
 		deps: null,
+		writeVersion: 0,
+		readVersion: 0,
+		reactions: null,
+		value: undefined,
+		equals: () => true,
+		computeCount: 0,
+		lastComputedTime: 0,
+		cacheThreshold: 0,
+		parent: null,
+		children: null
 	};
 
 	const execute = async () => {

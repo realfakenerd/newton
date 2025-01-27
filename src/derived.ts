@@ -1,277 +1,193 @@
 import { batchDepth } from "./batch.js";
-import { activeEffect, effectStack, setActiveEffect } from "./effect.js";
+import { activeEffect, setActiveEffect } from "./effect.js";
 import { UNINITIALIZED } from "./symbols.js";
-import type { Equals, Reaction, Value } from "./types.js";
+import type { DerivedValue, Equals, Reaction, Value } from "./types.js";
 
 const enum Flags {
-	DIRTY = 1 << 0, // 1 - Value needs to be recomputed
-	RUNNING = 1 << 1, // 2 - Computation is currently running
-	ASYNC = 1 << 2, // 4 - It's an async derived function
-	INITIALIZED = 1 << 3, // 8 - Initial value has been computed
-	HAS_ERROR = 1 << 4, // 16 - Last computation resulted in an error
+	DIRTY = 1 << 0,
+	RUNNING = 1 << 1,
+	ASYNC = 1 << 2,
+	INITIALIZED = 1 << 3,
+	HAS_ERROR = 1 << 4,
+	UNOWNED = 1 << 5,
+	DERIVED = 1 << 6,
 }
 
 type DerivedFn<T> = () => T;
 
 const derivedCache = new WeakMap<DerivedFn<any>, WeakRef<Derived<any>>>();
 
-export class Derived<T> implements Value<T> {
-	f = 0; // Bitmask flags for internal state tracking
-	#wv = 0; // Write version - incremented on value change
-	#rv = 0; // Read version - used to detect stale reads
-	reactions: Reaction[] | null = null; // List of reactions to notify on change
-	deps: Value[] | null = null; // List of dependencies for derived values
-	v: T; // Current value
+function createDerived<T>(fn: () => T, equals: Equals<T> = Object.is) {
+	let flags = Flags.DERIVED | Flags.DIRTY;
 
-	#dirty = true;
-	#lastComputedTime = 0;
-	#computeCount = 0;
-	#cacheThreshold = 100; // ms
-	#promise: Promise<T> | null = null;
-	#error: any = null;
-
-	constructor(
-		public fn: DerivedFn<T>,
-		public equals: Equals<T> = Object.is,
-	) {
-		this.v = UNINITIALIZED as T;
-		if (fn.constructor.name === "AsyncFunction") {
-			this.f |= Flags.ASYNC;
-		}
-
-		this.f |= Flags.DIRTY;
-
-		if (!(this.f & Flags.ASYNC)) {
-			this.#compute();
-		} else {
-			this.#computeAsync();
-		}
+	if (!activeEffect) {
+		flags |= Flags.UNOWNED;
 	}
 
-	#collectDependencies() {
-		if (this.deps) {
-			for (const dep of this.deps) {
-				if (dep.reactions) {
-					const index = dep.reactions.findIndex(
-						(r) => r.fn === this.#handleDependencyChange,
-					);
-					if (index === -1) {
-						dep.reactions.splice(index, 1);
-					}
-				}
+	const derived = {
+		flags,
+		writeVersion: 0,
+		readVersion: 0,
+		reactions: null,
+		deps: null,
+		value: UNINITIALIZED as T,
+		fn,
+		equals,
+		computeCount: 0,
+		lastComputedTime: 0,
+		cacheThreshold: 100,
+		parent: null as DerivedValue<any> | null,
+		children: null as DerivedValue<any>[] | null,
+	} satisfies DerivedValue<T>;
+
+	const parentDerived =
+		activeEffect && activeEffect.flags & Flags.DERIVED
+			? (activeEffect as DerivedValue<any>)
+			: null;
+
+	if (parentDerived) {
+		derived.parent = parentDerived;
+		if (!parentDerived.children) {
+			parentDerived.children = [];
+		}
+		parentDerived.children.push(derived);
+	}
+
+	return derived;
+}
+
+function notifyReactions(derived: DerivedValue) {
+	if (!derived.reactions) return;
+	for (const reaction of derived.reactions) {
+		if (reaction.fn) {
+			try {
+				reaction.fn();
+			} catch (error) {
+				console.error("Reaction Error:", error);
 			}
 		}
-
-		this.deps = [];
-	}
-
-	#handleDependencyChange() {
-		if (!(this.f & Flags.DIRTY)) {
-			this.f |= Flags.DIRTY;
-			this.#wv++;
-		}
-
-		if (this.reactions && batchDepth === 0) {
-			for (const reaction of this.reactions) {
-				if (reaction.fn) {
-					try {
-						reaction.fn();
-					} catch (error) {
-						console.error("Effect Error:", error);
-					}
-				}
-			}
-		}
-	}
-
-	async #computeAsync() {
-		if (this.f & Flags.RUNNING) {
-			return this.#promise;
-		}
-
-		this.f |= Flags.RUNNING;
-		const start = performance.now();
-
-		const prevEffect = activeEffect;
-		const reaction: Reaction = {
-			f: 0,
-			wv: 0,
-			fn: this.#handleDependencyChange,
-			deps: null,
-		};
-
-		setActiveEffect(reaction);
-
-		this.#collectDependencies();
-
-		try {
-			this.#promise = (async () => {
-				try {
-					const value = await this.fn();
-
-					const computeTime = performance.now() - start;
-					this.#updateComputationStats(computeTime);
-
-					if (!this.equals(this.v, value)) {
-						this.v = value;
-						this.#wv++;
-						this.#notifyReactions();
-					}
-
-					this.f &= ~Flags.DIRTY;
-					this.f |= Flags.INITIALIZED;
-					this.f &= ~Flags.HAS_ERROR;
-
-					return value;
-				} catch (error) {
-					this.#error = error;
-					this.f |= Flags.HAS_ERROR;
-					throw error;
-				} finally {
-					this.f &= ~Flags.RUNNING;
-				}
-			})();
-
-			return await this.#promise;
-		} finally {
-			setActiveEffect(prevEffect);
-		}
-	}
-
-	#compute() {
-		if (this.f & Flags.RUNNING) {
-			throw new Error("Circular dependency detected");
-		}
-
-		this.f |= Flags.RUNNING;
-		const start = performance.now();
-
-		const prevEffect = activeEffect;
-		const reaction: Reaction = {
-			f: 0,
-			wv: 0,
-			fn: this.#handleDependencyChange,
-			deps: null,
-		};
-
-		setActiveEffect(reaction);
-		this.#collectDependencies();
-
-		try {
-			const value = this.fn() as T;
-			const computeTime = performance.now() - start;
-			this.#updateComputationStats(computeTime);
-
-			if (!this.equals(this.v, value)) {
-				this.v = value;
-				this.#wv++;
-			}
-
-			this.f &= ~Flags.DIRTY;
-			this.f |= Flags.INITIALIZED;
-			this.f &= ~Flags.HAS_ERROR;
-			return value;
-		} catch (error) {
-			this.#error = error;
-			this.f |= Flags.HAS_ERROR;
-			throw error;
-		} finally {
-			this.f &= ~Flags.RUNNING;
-			setActiveEffect(prevEffect);
-		}
-	}
-
-	#updateComputationStats(computeTime: number) {
-		this.#computeCount++;
-		if (this.#computeCount > 10) {
-			this.#cacheThreshold = Math.max(50, computeTime * 2);
-		}
-		this.#lastComputedTime = Date.now();
-	}
-
-	#notifyReactions() {
-		if (this.reactions && batchDepth === 0) {
-			for (const reaction of this.reactions) {
-				if (reaction.fn) {
-					try {
-						reaction.fn();
-					} catch (error) {
-						console.error("Reaction Error:", error);
-					}
-				}
-			}
-		}
-	}
-
-	get() {
-		this.#rv++;
-
-		if (activeEffect) {
-			if (!this.reactions) {
-				this.reactions = [];
-			}
-
-			if (!this.reactions.includes(activeEffect)) {
-				this.reactions.push(activeEffect);
-			}
-		}
-
-		if (this.f & Flags.ASYNC) {
-			if (!(this.f & Flags.INITIALIZED)) {
-				throw new Error("Async Derived value is not yet initialized");
-			}
-
-			if (this.f & Flags.HAS_ERROR) {
-				throw this.#error;
-			}
-		}
-
-		if (
-			this.f & Flags.DIRTY &&
-			Date.now() - this.#lastComputedTime > this.#cacheThreshold
-		) {
-			if (this.f & Flags.ASYNC) {
-				this.#computeAsync();
-			} else {
-				this.#compute();
-			}
-		}
-		return this.v;
-	}
-
-	[Symbol.toPrimitive]() {
-		return this.get();
-	}
-
-	toString() {
-		return String(this.get());
-	}
-
-	valueOf() {
-		return this.get();
 	}
 }
 
-export function derived<T>(fn: DerivedFn<T>) {
-	let cachedDerived = derivedCache.get(fn)?.deref() as Derived<T> | undefined;
+function handleDependencyChange(derived: DerivedValue) {
+	if (!(derived.flags & Flags.DIRTY)) {
+		derived.flags |= Flags.DIRTY;
+		derived.writeVersion++;
+	}
+
+	if (derived.reactions && batchDepth === 0) {
+		notifyReactions(derived);
+	}
+}
+
+function collectDependencies(derived: DerivedValue) {
+	if (derived.deps) {
+		for (const dep of derived.deps) {
+			if (dep.reactions) {
+				const index = dep.reactions.findIndex(
+					(r) => r.fn === handleDependencyChange.bind(null, derived),
+				);
+
+				if (index !== -1) {
+					dep.reactions.splice(index, 1);
+				}
+			}
+		}
+	}
+	derived.deps = [];
+}
+
+function compute<T>(derived: DerivedValue<T>): T {
+	if (derived.flags & Flags.RUNNING) {
+		throw new Error("Circular dependency detected");
+	}
+
+	derived.flags |= Flags.RUNNING;
+	const start = performance.now();
+	const prevEffect = activeEffect;
+
+	const reaction: Reaction = {
+		flags: 0,
+		fn: () => handleDependencyChange(derived),
+		deps: null,
+	};
+
+	setActiveEffect(reaction);
+	collectDependencies(derived);
+
+	try {
+		const value = derived.fn();
+		const computeTime = performance.now() - start;
+
+		updateComputationStats(derived, computeTime);
+
+		if (!derived.equals(derived.value, value)) {
+			derived.value = value;
+			derived.writeVersion++;
+		}
+
+		derived.flags &= ~Flags.DIRTY;
+		derived.flags |= Flags.INITIALIZED;
+
+		return value;
+	} finally {
+		derived.flags &= ~Flags.RUNNING;
+		setActiveEffect(prevEffect);
+	}
+}
+
+function updateComputationStats(
+	derived: DerivedValue<any>,
+	computeTime: number,
+) {
+	derived.computeCount++;
+	if (derived.computeCount > 10) {
+		derived.cacheThreshold = Math.max(50, computeTime * 2);
+	}
+	derived.lastComputedTime = Date.now();
+}
+
+function getDerivedValue<T>(derived: DerivedValue<T>): T {
+	derived.readVersion++;
+
+	if (activeEffect) {
+		if (!derived.reactions) {
+			derived.reactions = [];
+		}
+		if (!derived.reactions.includes(activeEffect)) {
+			derived.reactions.push(activeEffect);
+		}
+	}
+
+	if (
+		derived.flags & Flags.DIRTY &&
+		Date.now() - derived.lastComputedTime > derived.cacheThreshold
+	) {
+		compute(derived);
+	}
+
+	return derived.value;
+}
+
+export function derived<T>(fn: () => T, equals: Equals<T> = Object.is) {
+	let cachedDerived = derivedCache.get(fn)?.deref() as DerivedValue<T>;
+
 	if (!cachedDerived) {
-		cachedDerived = new Derived(fn);
+		cachedDerived = createDerived(fn, equals);
 		derivedCache.set(fn, new WeakRef(cachedDerived));
 	}
 
-	const proxy = new Proxy(cachedDerived, {
+	// Proxy para manter a API pública limpa e consistente
+	return new Proxy(cachedDerived, {
 		get(target, prop) {
 			if (
+				prop === "value" ||
 				prop === Symbol.toPrimitive ||
-				prop === "valueOf" ||
-				prop === "toString"
+				prop === "valueOf"
 			) {
-				return (target as any)[prop].bind(target);
+				return getDerivedValue(target);
 			}
-
-			return target.get();
+			return Reflect.get(target, prop);
 		},
 	});
-
-	return proxy as unknown as T;
 }

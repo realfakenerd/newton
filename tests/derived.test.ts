@@ -6,7 +6,6 @@ describe("derived", () => {
 		let count = state(0);
 		const doubled = derived(() => count * 2);
 		expect(doubled).toBe(0);
-
 		count = 2;
 		expect(doubled).toBe(4);
 	});
