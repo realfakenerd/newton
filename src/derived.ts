@@ -1,193 +1,71 @@
-import { batchDepth } from "./batch.js";
-import { activeEffect, setActiveEffect } from "./effect.js";
-import { UNINITIALIZED } from "./symbols.js";
-import type { DerivedValue, Equals, Reaction, Value } from "./types.js";
+import {
+	DERIVED,
+	DESTROYED,
+	DIRTY,
+	EFFECT_HAS_DERIVED,
+	UNOWNED,
+} from "./constants.js";
+import { destroyEffect } from "./effect.js";
+import { equals } from "./equality.js";
+import {
+	activeEffect,
+	activeReaction,
+	removeReactions,
+	setSignalStatus,
+} from "./runtime.js";
+import type { Derived, Effect, Equals } from "./types.js";
 
-const enum Flags {
-	DIRTY = 1 << 0,
-	RUNNING = 1 << 1,
-	ASYNC = 1 << 2,
-	INITIALIZED = 1 << 3,
-	HAS_ERROR = 1 << 4,
-	UNOWNED = 1 << 5,
-	DERIVED = 1 << 6,
-}
+export function derived<V>(fn: () => V) {
+	let flags = DERIVED | DIRTY;
 
-type DerivedFn<T> = () => T;
-
-const derivedCache = new WeakMap<DerivedFn<any>, WeakRef<Derived<any>>>();
-
-function createDerived<T>(fn: () => T, equals: Equals<T> = Object.is) {
-	let flags = Flags.DERIVED | Flags.DIRTY;
-
-	if (!activeEffect) {
-		flags |= Flags.UNOWNED;
+	if (activeEffect === null) {
+		flags |= UNOWNED;
+	} else {
+		activeEffect.f |= EFFECT_HAS_DERIVED;
 	}
-
-	const derived = {
-		flags,
-		writeVersion: 0,
-		readVersion: 0,
-		reactions: null,
-		deps: null,
-		value: UNINITIALIZED as T,
-		fn,
-		equals,
-		computeCount: 0,
-		lastComputedTime: 0,
-		cacheThreshold: 100,
-		parent: null as DerivedValue<any> | null,
-		children: null as DerivedValue<any>[] | null,
-	} satisfies DerivedValue<T>;
 
 	const parentDerived =
-		activeEffect && activeEffect.flags & Flags.DERIVED
-			? (activeEffect as DerivedValue<any>)
+		activeReaction !== null && (activeReaction?.f & DERIVED) !== 0
+			? (activeReaction as Derived)
 			: null;
 
-	if (parentDerived) {
-		derived.parent = parentDerived;
-		if (!parentDerived.children) {
-			parentDerived.children = [];
-		}
-		parentDerived.children.push(derived);
-	}
-
-	return derived;
-}
-
-function notifyReactions(derived: DerivedValue) {
-	if (!derived.reactions) return;
-	for (const reaction of derived.reactions) {
-		if (reaction.fn) {
-			try {
-				reaction.fn();
-			} catch (error) {
-				console.error("Reaction Error:", error);
-			}
-		}
-	}
-}
-
-function handleDependencyChange(derived: DerivedValue) {
-	if (!(derived.flags & Flags.DIRTY)) {
-		derived.flags |= Flags.DIRTY;
-		derived.writeVersion++;
-	}
-
-	if (derived.reactions && batchDepth === 0) {
-		notifyReactions(derived);
-	}
-}
-
-function collectDependencies(derived: DerivedValue) {
-	if (derived.deps) {
-		for (const dep of derived.deps) {
-			if (dep.reactions) {
-				const index = dep.reactions.findIndex(
-					(r) => r.fn === handleDependencyChange.bind(null, derived),
-				);
-
-				if (index !== -1) {
-					dep.reactions.splice(index, 1);
-				}
-			}
-		}
-	}
-	derived.deps = [];
-}
-
-function compute<T>(derived: DerivedValue<T>): T {
-	if (derived.flags & Flags.RUNNING) {
-		throw new Error("Circular dependency detected");
-	}
-
-	derived.flags |= Flags.RUNNING;
-	const start = performance.now();
-	const prevEffect = activeEffect;
-
-	const reaction: Reaction = {
-		flags: 0,
-		fn: () => handleDependencyChange(derived),
+	const signal: Derived<V> = {
+		children: null,
 		deps: null,
+		equals,
+		f: flags,
+		fn,
+		reactions: null,
+		rv: 0,
+		v: null as V,
+		wv: 0,
+		parent: (parentDerived ?? activeEffect) as Derived,
 	};
 
-	setActiveEffect(reaction);
-	collectDependencies(derived);
-
-	try {
-		const value = derived.fn();
-		const computeTime = performance.now() - start;
-
-		updateComputationStats(derived, computeTime);
-
-		if (!derived.equals(derived.value, value)) {
-			derived.value = value;
-			derived.writeVersion++;
-		}
-
-		derived.flags &= ~Flags.DIRTY;
-		derived.flags |= Flags.INITIALIZED;
-
-		return value;
-	} finally {
-		derived.flags &= ~Flags.RUNNING;
-		setActiveEffect(prevEffect);
-	}
+	return signal;
 }
 
-function updateComputationStats(
-	derived: DerivedValue<any>,
-	computeTime: number,
-) {
-	derived.computeCount++;
-	if (derived.computeCount > 10) {
-		derived.cacheThreshold = Math.max(50, computeTime * 2);
-	}
-	derived.lastComputedTime = Date.now();
-}
+function destroyDerivedChildren(derived: Derived) {
+	const children = derived.children;
+	if (children !== null) {
+		derived.children = null;
 
-function getDerivedValue<T>(derived: DerivedValue<T>): T {
-	derived.readVersion++;
+		for (let i = 0; i < children.length; i++) {
+			const child = children[i];
 
-	if (activeEffect) {
-		if (!derived.reactions) {
-			derived.reactions = [];
-		}
-		if (!derived.reactions.includes(activeEffect)) {
-			derived.reactions.push(activeEffect);
-		}
-	}
-
-	if (
-		derived.flags & Flags.DIRTY &&
-		Date.now() - derived.lastComputedTime > derived.cacheThreshold
-	) {
-		compute(derived);
-	}
-
-	return derived.value;
-}
-
-export function derived<T>(fn: () => T, equals: Equals<T> = Object.is) {
-	let cachedDerived = derivedCache.get(fn)?.deref() as DerivedValue<T>;
-
-	if (!cachedDerived) {
-		cachedDerived = createDerived(fn, equals);
-		derivedCache.set(fn, new WeakRef(cachedDerived));
-	}
-
-	// Proxy para manter a API pública limpa e consistente
-	return new Proxy(cachedDerived, {
-		get(target, prop) {
-			if (
-				prop === "value" ||
-				prop === Symbol.toPrimitive ||
-				prop === "valueOf"
-			) {
-				return getDerivedValue(target);
+			if ((child.f & DERIVED) !== 0) {
+				destroyDerived(child as Derived);
+			} else {
+				destroyEffect(child as Effect);
 			}
-			return Reflect.get(target, prop);
-		},
-	});
+		}
+	}
+}
+
+export function destroyDerived(derived: Derived) {
+	destroyDerivedChildren(derived);
+	removeReactions(derived, 0);
+	setSignalStatus(derived, DESTROYED);
+
+	derived.v = derived.children = derived.deps = derived.reactions = null;
 }
